@@ -7,7 +7,7 @@ export async function sendChatMessage({
   summary = '',
   charts = null,
   datasets = null,
-  apiKey = null,
+  apiKey = REDACTED,
   timeoutMs = 12000,
 } = {}) {
   // Only call OpenAI GPT-4 API
