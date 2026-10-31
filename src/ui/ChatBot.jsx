@@ -70,7 +70,7 @@ export default function ChatBot() {
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [useMock, setUseMock] = useState(() => !localStorage.getItem('openai_api_key'));
+  const [useMock, setUseMock] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('openai_api_key') || '');
   const [apiKeyInput, setApiKeyInput] = useState('');

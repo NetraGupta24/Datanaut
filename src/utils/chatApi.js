@@ -1,93 +1,164 @@
-// Simple chat API helper. Starts with a mock implementation but can call
-// a custom endpoint or the OpenAI Chat Completions API when an API key is
-// provided via options or Vite env (VITE_OPENAI_KEY).
+// Builds a rich, structured summary from datasets and charts
+export function buildRichSummary(datasets, charts) {
+  if (!datasets || Object.keys(datasets).length === 0) {
+    return 'No datasets loaded yet.';
+  }
+
+  const lines = [];
+
+  // Dataset analysis
+  Object.values(datasets).forEach((ds) => {
+    const cols = ds?.schema?.headers || [];
+    const rows = ds?.data || ds?.rowsPreview || [];
+    const rowCount = ds?.originalRowCount ?? rows.length;
+
+    lines.push(`📊 Dataset: "${ds.name}"`);
+    lines.push(`   Rows: ${rowCount.toLocaleString()}, Columns: ${cols.length}`);
+    lines.push(`   Columns: ${cols.join(', ')}`);
+
+    // Numeric column stats
+    const numericStats = [];
+    cols.forEach((col) => {
+      const vals = rows
+        .map((r) => parseFloat(r[col]))
+        .filter((v) => !isNaN(v));
+      if (vals.length > 0) {
+        const sum = vals.reduce((a, b) => a + b, 0);
+        const mean = sum / vals.length;
+        const min = Math.min(...vals);
+        const max = Math.max(...vals);
+        numericStats.push(
+          `   "${col}": avg=${mean.toFixed(2)}, min=${min}, max=${max}, sum=${sum.toFixed(2)}`
+        );
+      }
+    });
+
+    if (numericStats.length > 0) {
+      lines.push(`   Numeric stats:`);
+      numericStats.slice(0, 5).forEach((s) => lines.push(s));
+    }
+
+    // Categorical column insights (top values)
+    cols.forEach((col) => {
+      const vals = rows.map((r) => r[col]).filter((v) => v !== undefined && v !== null && v !== '');
+      const isNumeric = vals.every((v) => !isNaN(parseFloat(v)));
+      if (!isNumeric && vals.length > 0) {
+        const freq = {};
+        vals.forEach((v) => { freq[String(v)] = (freq[String(v)] || 0) + 1; });
+        const top = Object.entries(freq)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3)
+          .map(([k, v]) => `${k}(${v})`)
+          .join(', ');
+        lines.push(`   Top "${col}" values: ${top}`);
+      }
+    });
+
+    lines.push('');
+  });
+
+  // Charts summary
+  if (charts && Object.keys(charts).length > 0) {
+    lines.push(`📈 Saved charts (${Object.keys(charts).length}):`);
+    Object.values(charts).forEach((ch) => {
+      lines.push(`   - "${ch.title}" (${ch.chartType})`);
+    });
+  }
+
+  return lines.join('\n');
+}
 
 export async function sendChatMessage({
   question = '',
   summary = '',
-  charts = null,
   datasets = null,
-  apiKey = '', // Use environment variable instead of hardcoding
-  useMock = process.env.NODE_ENV === 'development',
-  timeoutMs = 12000,
+  charts = null,
+  useMock = false,
+  timeoutMs = 15000,
 } = {}) {
-  // Use mock response if useMock is true
   if (useMock) {
     return mockChatResponse(question, summary);
   }
-  
-  // Try to get API key from multiple sources
-  const key = apiKey || 
-              (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_OPENAI_KEY) || 
-              localStorage.getItem('openai_api_key') || 
-              null;
-              
-  if (!key) throw new Error('No API key configured for chat. Please add your API key in the settings.');
+
+  const key = typeof import.meta !== 'undefined' &&
+              import.meta.env &&
+              import.meta.env.VITE_GROQ_KEY;
+
+  if (!key) throw new Error('No Groq API key found. Add VITE_GROQ_KEY to your .env file.');
+
+  // Build rich summary from actual data if available
+  const richSummary = (datasets && Object.keys(datasets).length > 0)
+    ? buildRichSummary(datasets, charts)
+    : summary || 'No dataset loaded yet.';
 
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const body = {
-      model: 'gpt-4',
-      messages: [
-        { role: 'system', content: 'You are a helpful data assistant that summarizes datasets and explains charts.' },
-        { role: 'user', content: `${question}\n\nDataset summary:\n${summary}` },
-      ],
-      temperature: 0.2,
-    };
 
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${key}`,
+        'Authorization': `Bearer ${key}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          {
+            role: 'system',
+            content: `You are a smart data analysis assistant for a dashboard called DATANAUT.
+You have access to the user's actual dataset statistics and chart information.
+When answering:
+- Give specific numbers and insights from the data
+- Suggest useful visualizations based on the columns available
+- Point out interesting patterns or anomalies
+- Be concise but insightful
+- Use bullet points for clarity when listing multiple insights`
+          },
+          {
+            role: 'user',
+            content: `Here is my current data:\n\n${richSummary}\n\nMy question: ${question}`
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 700,
+      }),
       signal: controller.signal,
     });
+
     clearTimeout(id);
+
     if (!res.ok) {
       const txt = await res.text();
-      throw new Error(`OpenAI error ${res.status}: ${txt}`);
+      throw new Error(`Groq error ${res.status}: ${txt}`);
     }
+
     const json = await res.json();
-    const text = json?.choices?.[0]?.message?.content || JSON.stringify(json);
+    const text = json?.choices?.[0]?.message?.content || 'No response from Groq.';
     return { text };
+
   } catch (err) {
     clearTimeout(id);
     throw err;
   }
 }
 
-// Mock response function for testing without API key
 function mockChatResponse(question, summary) {
   return new Promise((resolve) => {
     setTimeout(() => {
-      const responses = [
-        "I've analyzed your data and found some interesting patterns.",
-        "Based on your dataset, I can see several trends worth exploring.",
-        "Your data shows some interesting correlations between variables.",
-        "I've examined your charts and datasets. Would you like me to explain any specific aspect?",
-        "From the summary provided, your data contains numeric and categorical variables that could be visualized effectively."
-      ];
-      
-      // If question contains specific keywords, provide more targeted responses
-      let response = "";
-      if (question.toLowerCase().includes("summary")) {
+      let response = '';
+      if (question.toLowerCase().includes('summary')) {
         response = `Here's a summary of your data:\n${summary}`;
-      } else if (question.toLowerCase().includes("chart") || question.toLowerCase().includes("visual")) {
-        response = "Your charts show the relationship between variables in your dataset. Consider adding more visualizations to explore other dimensions of your data.";
-      } else if (question.toLowerCase().includes("help")) {
-        response = "I can help you analyze your data, explain charts, suggest visualizations, and answer questions about your datasets. Just ask!";
+      } else if (question.toLowerCase().includes('chart')) {
+        response = 'Your charts show relationships between variables. Try adding more visualizations!';
+      } else if (question.toLowerCase().includes('help')) {
+        response = 'I can help you analyze data, explain charts, and suggest visualizations. Just ask!';
       } else {
-        // Random response if no specific keywords
-        response = responses[Math.floor(Math.random() * responses.length)];
+        response = "I've analyzed your data and found some interesting patterns.";
       }
-      
       resolve({ text: response });
-    }, 800); // Simulate network delay
+    }, 800);
   });
 }
 
-// Small convenience function to allow pluggable replacements later.
 export default sendChatMessage;
