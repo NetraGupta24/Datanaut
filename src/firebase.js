@@ -2,19 +2,39 @@ import { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
-const firebaseConfig = {
-  apiKey: "AIzaSyATuyb3gOdjYY13luQVTFlzKVd1iADeavk",
-  authDomain: "datanaut-3f632.firebaseapp.com",
-  projectId: "datanaut-3f632",
-  storageBucket: "datanaut-3f632.firebasestorage.app",
-  messagingSenderId: "175440237356",
-  appId: "1:175440237356:web:17c841b3d63cf73ae39289"
-};
-
-const app = initializeApp(firebaseConfig);
-
-export const auth = getAuth(app);
-export const db = getFirestore(app);
 // Demo mode (any email/password works, nothing is saved to Firebase) only when explicitly enabled
 export const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
+
+// Web config comes from .env (see .env.example). These values are public client
+// identifiers; access control is enforced by firestore.rules.
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID
+};
+
+const REQUIRED = {
+  apiKey: "VITE_FIREBASE_API_KEY",
+  authDomain: "VITE_FIREBASE_AUTH_DOMAIN",
+  projectId: "VITE_FIREBASE_PROJECT_ID",
+  appId: "VITE_FIREBASE_APP_ID"
+};
+const missing = Object.entries(REQUIRED)
+  .filter(([field]) => !firebaseConfig[field])
+  .map(([, envName]) => envName);
+
+if (missing.length && !DEMO_MODE) {
+  throw new Error(
+    `Missing Firebase config: ${missing.join(", ")}. Copy .env.example to .env, fill it in, and restart Vite.`
+  );
+}
+
+// In demo mode without a config, run with no Firebase at all (auth/db are null)
+const app = missing.length ? null : initializeApp(firebaseConfig);
+
+export const auth = app ? getAuth(app) : null;
+export const db = app ? getFirestore(app) : null;
 export default app;

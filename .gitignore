@@ -1,9 +1,26 @@
 /node_modules
-.env
-/package-lock.json
-.env.test
-.env.development
-.env.production
-.env.example
-.env.example.test
 /src/backend/node_modules
+/package-lock.json
+/dist
+
+# Env files (keep the example)
+.env
+.env.*
+!.env.example
+chatbot-service/.env
+
+# Firebase / Google service account keys
+*-sa.json
+*serviceAccount*.json
+*service-account*.json
+*firebase-adminsdk*.json
+
+# Python (chatbot-service)
+chatbot-service/data/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local tooling
+.claude/launch.json

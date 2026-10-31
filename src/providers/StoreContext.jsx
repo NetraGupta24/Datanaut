@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { parseCSVText, parseJSONText } from "../utils/parseData.js";
-import { db } from "../firebase.js";
+import { db, DEMO_MODE } from "../firebase.js";
 import { useAuth } from "./AuthContext.jsx";
 import {
   collection,
@@ -45,23 +45,19 @@ export function StoreProvider({ children }) {
   const [seeding, setSeeding] = useState(false);
   const [seeded, setSeeded] = useState(false);
 
-  const isFirestoreAvailable = !!db && !!user;
+  // Demo users have no real Firebase session, so their data stays in localStorage
+  const isFirestoreAvailable = !!db && !!user && !DEMO_MODE;
 
   // ─── Load data ───────────────────────────────────────────────
   useEffect(() => {
-    if (!user) {
-      // Not logged in — use localStorage
+    if (!isFirestoreAvailable) {
+      // Not logged in (or demo mode) — use localStorage
       const storedDatasets = safeParse(localStorage.getItem(DATASETS_KEY));
       const storedCharts = safeParse(localStorage.getItem(CHARTS_KEY));
       const seededFlag = localStorage.getItem(SEED_FLAG_KEY) === "true";
       setDatasets(storedDatasets);
       setCharts(storedCharts);
       setSeeded(seededFlag);
-      setLoading(false);
-      return;
-    }
-
-    if (!db) {
       setLoading(false);
       return;
     }
@@ -98,20 +94,20 @@ export function StoreProvider({ children }) {
       unsubDatasets();
       unsubCharts();
     };
-  }, [user]);
+  }, [user, isFirestoreAvailable]);
 
   // ─── Sync to localStorage when not using Firestore ───────────
   useEffect(() => {
-    if (!loading && !user) {
+    if (!loading && !isFirestoreAvailable) {
       localStorage.setItem(DATASETS_KEY, JSON.stringify(datasets));
     }
-  }, [datasets, loading, user]);
+  }, [datasets, loading, isFirestoreAvailable]);
 
   useEffect(() => {
-    if (!loading && !user) {
+    if (!loading && !isFirestoreAvailable) {
       localStorage.setItem(CHARTS_KEY, JSON.stringify(charts));
     }
-  }, [charts, loading, user]);
+  }, [charts, loading, isFirestoreAvailable]);
 
   // ─── Seed samples ─────────────────────────────────────────────
   const seedSamples = useCallback(async () => {
