@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { MessageSquare, Send } from 'lucide-react';
 import { sendChatMessage, formatProfile, MAX_HISTORY_MESSAGES } from '../utils/chatApi';
 import { useStore } from '../providers/StoreContext.jsx';
+import DatasetChart from './DatasetChart.jsx';
+import { defaultPalette } from '../utils/colors.js';
 
 const MESSAGES_KEY = 'chat_messages';
 const DATASET_KEY = 'chat_dataset_id';
@@ -95,9 +98,69 @@ function Evidence({ evidence }) {
   );
 }
 
+const CHART_TYPES = ['line', 'bar', 'area', 'scatter', 'pie', 'donut', 'radar'];
+const MAPPING_FIELDS = ['xField', 'yField', 'categoryField', 'valueField', 'angleField', 'radiusField'];
+
+// The server checks charts when it builds them; check again in case the dataset changed since
+function chartProblem(chart, dataset) {
+  if (!dataset) return 'This dataset no longer exists.';
+  if (!CHART_TYPES.includes(chart?.chartType)) return "This chart type isn't supported.";
+  const headers = dataset.schema?.headers || [];
+  const mappings = chart.mappings || {};
+  const fields = [...MAPPING_FIELDS.map((key) => mappings[key]), ...(mappings.yFields || [])].filter(Boolean);
+  const missing = fields.filter((field) => !headers.includes(field));
+  return missing.length ? `"${dataset.name}" no longer has ${missing.join(', ')}.` : null;
+}
+
+function ChartPreview({ message, dataset, onSave }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const problem = chartProblem(message.chart, dataset);
+
+  async function add() {
+    setSaving(true);
+    setError('');
+    try {
+      await onSave(message);
+    } catch (err) {
+      console.error(err);
+      setError(`Couldn't add the chart: ${err.message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mt-2 rounded-md border border-slate-200 bg-white/70 p-2 dark:border-slate-700 dark:bg-slate-900/60">
+      {problem ? (
+        <div className="text-xs text-rose-600 dark:text-rose-300">{problem}</div>
+      ) : (
+        <DatasetChart chart={message.chart} dataset={dataset} compact />
+      )}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {message.savedChartId ? (
+          <Link to="/dashboard" className="text-xs font-medium text-emerald-600 hover:underline dark:text-emerald-400">
+            Added to dashboard · Open dashboard
+          </Link>
+        ) : (
+          <button
+            type="button"
+            onClick={add}
+            disabled={saving || Boolean(problem)}
+            className="rounded-full bg-gradient-to-r from-indigo-600 to-purple-600 px-3 py-1 text-xs font-semibold text-white hover:from-indigo-700 hover:to-purple-700 disabled:opacity-50"
+          >
+            {saving ? 'Adding…' : 'Add to dashboard'}
+          </button>
+        )}
+        {error ? <span className="text-[11px] text-rose-600 dark:text-rose-300">{error}</span> : null}
+      </div>
+    </div>
+  );
+}
+
 export default function ChatBot() {
   // Datasets come from the store so logged-in users see their Firestore data
-  const { datasets, usesServerStorage } = useStore();
+  const { datasets, usesServerStorage, saveChart, generateId } = useStore();
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState(() => readStored(MESSAGES_KEY, []));
@@ -184,13 +247,28 @@ export default function ChatBot() {
     setLoading(true);
     try {
       const resp = await sendChatMessage({ datasetId, message: trimmed, history });
-      add({ role: 'bot', text: resp.answer, evidence: resp.evidence });
+      add({ role: 'bot', text: resp.answer, evidence: resp.evidence, chart: resp.chart || null });
     } catch (err) {
       console.error(err);
       add({ role: 'bot', text: err.message || 'Something went wrong. Please try again.', error: true });
     } finally {
       setLoading(false);
     }
+  }
+
+  // Save the suggested chart with the same fields the Visualize page writes
+  async function saveSuggestedChart(message) {
+    const now = new Date().toISOString();
+    const id = generateId();
+    const { chart } = message;
+    await saveChart({
+      ...chart,
+      id,
+      options: { ...chart.options, seriesColors: {}, palette: defaultPalette.slice() },
+      createdAt: now,
+      updatedAt: now
+    });
+    setMessages((all) => all.map((m) => (m.id === message.id ? { ...m, savedChartId: id } : m)));
   }
 
   function exportChat() {
@@ -269,7 +347,7 @@ export default function ChatBot() {
             </div>
           ) : null}
 
-          <div ref={listRef} className="p-3 h-80 overflow-auto bg-slate-50 dark:bg-slate-950">
+          <div ref={listRef} className="p-3 h-96 max-h-[calc(100vh-18rem)] overflow-auto bg-slate-50 dark:bg-slate-950">
             {visibleMessages.length === 0 && (
               <div className="flex flex-col items-center justify-center h-full text-center p-4">
                 <div className="w-16 h-16 bg-indigo-100 dark:bg-indigo-900 rounded-full flex items-center justify-center mb-3">
@@ -277,7 +355,8 @@ export default function ChatBot() {
                 </div>
                 <div className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Your Data Assistant</div>
                 <div className="text-xs text-slate-500 dark:text-slate-400 mb-3">
-                  Ask about {selected ? `"${selected.name}"` : 'your dataset'}: totals, top values, trends, comparisons, outliers.
+                  Ask about {selected ? `"${selected.name}"` : 'your dataset'}: totals, top values, trends, comparisons, outliers,
+                  or ask for a chart.
                 </div>
                 <div className="text-xs text-indigo-600 dark:text-indigo-400">Type /summary for a quick dataset overview</div>
               </div>
@@ -291,10 +370,11 @@ export default function ChatBot() {
                       : m.error
                         ? 'bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-200 border border-rose-200 dark:border-rose-800'
                         : 'bg-white bg-opacity-60 dark:bg-slate-800 dark:bg-opacity-60 backdrop-blur-md text-slate-900 dark:text-slate-100 border border-slate-200 dark:border-slate-700'
-                  } p-3 rounded-lg max-w-[85%] shadow-md`}
+                  } p-3 rounded-lg ${m.chart ? 'w-full' : 'max-w-[85%]'} shadow-md`}
                 >
                   <div className="text-xs opacity-70 mb-1">{m.role === 'user' ? 'You' : 'Assistant'} • {formatDate(m.ts)}</div>
                   <MessageText text={m.text} />
+                  {m.chart ? <ChartPreview message={m} dataset={datasets[m.datasetId]} onSave={saveSuggestedChart} /> : null}
                   <Evidence evidence={m.evidence} />
                 </div>
               </div>

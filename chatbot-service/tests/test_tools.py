@@ -116,6 +116,60 @@ def test_results_are_capped_at_50_rows():
     assert len(result["rows"]) == MAX_RESULT_ROWS and "showing 50 of 80 rows" in result["note"]
 
 
+def chart(df, **args):
+    result = call(df, "create_chart", **args)
+    return result.pop("chart"), result
+
+
+def test_create_chart_bar_matches_the_saved_chart_shape(df):
+    config, result = chart(df, title=" Revenue by region ", chart_type="bar", x_field="region", y_fields=["Revenue", "Units"])
+    assert config == {
+        "title": "Revenue by region",
+        "chartType": "bar",
+        "mappings": {"xField": "Region", "yFields": ["Revenue", "Units"], "stacked": False},
+        "options": {"aggregation": "sum", "topN": 0},
+    }
+    # Groups keep first-appearance order, like buildChartData on the dashboard
+    assert result["columns"] == ["Region", "sum(Revenue)", "sum(Units)"]
+    assert result["rows"] == [["North", 430, 41], ["South", 1960, 73], ["East", 210, 20]]
+    assert result["note"].startswith("bar chart ready (3 Region groups)")
+
+
+def test_create_chart_line_with_avg_top_n_and_raw_rows(df):
+    config, result = chart(
+        df, title="Top regions", chart_type="line", x_field="Region", y_fields=["Revenue"], aggregation="avg", top_n=2, stacked=True
+    )
+    assert config["mappings"]["stacked"] is False  # stacking is only for bar/area
+    assert config["options"] == {"aggregation": "avg", "topN": 2}
+    assert result["rows"] == [["South", pytest.approx(653.3333)], ["North", pytest.approx(143.3333)]]
+
+    config, result = chart(df, title="Revenue over time", chart_type="area", x_field="Date", y_fields=["Revenue"], aggregation="none")
+    assert config["options"]["aggregation"] == "none"
+    assert result["rows"][0] == ["2024-01-05", 100] and len(result["rows"]) == 8
+
+
+def test_create_chart_scatter_donut_and_radar(df):
+    config, result = chart(df, chart_type="scatter", x_field="Units", y_fields=["Revenue"], aggregation="sum")
+    assert config["mappings"] == {"xField": "Units", "yField": "Revenue"} and config["title"] == "Revenue vs Units"
+    assert config["options"]["aggregation"] == "none" and len(result["rows"]) == 8
+
+    config, result = chart(df, title="Share", chart_type="donut", x_field="Product", y_fields=["Revenue"], aggregation="none")
+    assert config["mappings"] == {"categoryField": "Product", "valueField": "Revenue", "donut": True}
+    assert config["options"]["aggregation"] == "sum"  # pie slices are always combined
+    assert as_dict(result) == {"A": 340, "B": 1960, "C": 300}
+
+    config, _ = chart(df, chart_type="radar", x_field="Product", y_fields=["Units"])
+    assert config["mappings"] == {"angleField": "Product", "radiusField": "Units"} and config["title"] == "Units by Product"
+
+
+def test_create_chart_rejects_pies_with_too_many_slices():
+    wide = pd.DataFrame({"k": [f"g{i}" for i in range(30)], "v": range(30)})
+    _, result = run_tool(wide, "create_chart", {"chart_type": "pie", "x_field": "k", "y_fields": ["v"]})
+    assert "30 distinct values" in result["error"]
+    config, _ = chart(wide, chart_type="pie", x_field="k", y_fields=["v"], top_n=10)
+    assert config["options"]["topN"] == 10
+
+
 @pytest.mark.parametrize(
     "name,args,message",
     [
@@ -130,6 +184,18 @@ def test_results_are_capped_at_50_rows():
         ("describe_column", {"column": "Revenue", "filters": [{"column": "Units", "op": ">", "value": 999}]}, "No rows match"),
         ("compare", {"column": "Region", "group_a": "North", "group_b": "Mars", "metric": "Revenue"}, "Some values"),
         ("group_by", {"column": "Region", "metric": "Revenue", "code": "import os"}, "Extra inputs"),
+        ("create_chart", {"chart_type": "bar", "x_field": "Region", "y_fields": []}, "Invalid arguments"),
+        ("create_chart", {"title": "t", "chart_type": "bar", "x_field": "Regoin", "y_fields": ["Revenue"]}, "Did you mean"),
+        ("create_chart", {"title": "t", "chart_type": "bar", "x_field": "Revenue", "y_fields": ["Revenue"]}, "can't be both"),
+        ("create_chart", {"chart_type": "pie", "x_field": "Region", "y_fields": ["Product"]}, "not numeric"),
+        ("create_chart", {"chart_type": "pie", "x_field": "Region", "y_fields": ["Revenue", "Units"]}, "exactly one"),
+        ("create_chart", {"chart_type": "scatter", "x_field": "Region", "y_fields": ["Revenue"]}, "not numeric"),
+        ("create_chart", {"chart_type": "heatmap", "x_field": "Region", "y_fields": ["Revenue"]}, "Invalid arguments"),
+        (
+            "create_chart",
+            {"title": "t", "chart_type": "bar", "x_field": "Region", "y_fields": ["Revenue"], "aggregation": "none", "top_n": 2},
+            "top_n only works",
+        ),
         ("drop_table", {}, "Unknown tool"),
     ],
 )

@@ -2,6 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .tools import ChartAgg, ChartType
+
 ColumnType = Literal["number", "date", "string"]
 
 
@@ -56,6 +58,22 @@ class Evidence(BaseModel):
     result_table: ResultTable
 
 
+class ChartOptions(BaseModel):
+    aggregation: ChartAgg
+    topN: int = Field(ge=0)
+
+
+class ChartConfig(BaseModel):
+    """Same shape the store saves to users/{uid}/charts; the frontend adds id, palette and timestamps."""
+
+    title: str
+    datasetId: str
+    chartType: ChartType
+    mappings: dict[str, Any]
+    options: ChartOptions
+
+
 class ChatResponse(BaseModel):
     answer: str
     evidence: list[Evidence]
+    chart: ChartConfig | None = None

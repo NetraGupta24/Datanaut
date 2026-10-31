@@ -2,12 +2,15 @@ import { createSqlConnection, getTables, previewTable } from "./modules/sql.js";
 import { createMqttConnection } from "./modules/mqtt.js";
 import { createSerialConnection } from "./modules/serial.js";
 import { createHttpConnection } from "./modules/http.js";
+import { AnomalyDetector, anomalyOptionsFromEnv } from "./anomalyDetector.js";
 
 class ConnectionManager {
   constructor() {
     this.connections = {};
     this.idCounter = 1;
     this.wss = null; // WebSocket server reference
+    // Rolling window per connection + topic/device + field (ANOMALY_WINDOW, default 50; ANOMALY_Z_THRESHOLD, default 3)
+    this.anomalyDetector = new AnomalyDetector(anomalyOptionsFromEnv());
   }
   
   // Attempt to coerce non-JSON serial lines into a flat object for charts
@@ -238,14 +241,24 @@ class ConnectionManager {
   
   broadcastUpdate(connectionId, topic, newData) {
     if (!this.wss) return;
+    // Score the reading even when no client is listening, so the window is warm when one connects
+    const device = newData?.device_id ?? newData?.deviceId ?? "";
+    const { anomaly, score, anomalies } = this.anomalyDetector.check(`${connectionId}|${topic}|${device}`, newData);
+    if (anomaly) {
+      console.warn(`🚨 Anomaly on ${connectionId} (${topic}):`, anomalies.map((a) => `${a.field}=${a.value} z=${a.score}`).join(", "));
+    }
+    const message = JSON.stringify({
+      type: "update",
+      id: connectionId,
+      topic: topic,
+      rows: [newData],
+      anomaly,
+      score,
+      anomalies
+    });
     this.wss.clients.forEach((client) => {
       if (client.readyState === 1) { // WebSocket.OPEN
-        client.send(JSON.stringify({
-          type: "update",
-          id: connectionId,
-          topic: topic,
-          rows: [newData]
-        }));
+        client.send(message);
       }
     });
   }
@@ -457,6 +470,7 @@ class ConnectionManager {
       clearInterval(conn.pollInterval);
       console.log(`🛑 Stopped HTTP polling for ${id}`);
     }
+    this.anomalyDetector.forget(`${id}|`);
     delete this.connections[id];
   }
 

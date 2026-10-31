@@ -7,6 +7,11 @@ import { buildChartData } from "../utils/chartData.js";
 
 const BACKEND_URL = "http://localhost:8085";
 const WS_URL = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss://localhost:8085' : 'ws://localhost:8085';
+const MAX_ANOMALY_KEYS = 200;
+
+// Flagged points per data source, kept outside the component because the dynamic dashboard
+// remounts its charts on every refresh
+const anomalyKeysBySource = new Map();
 
 /**
  * Wrapper component that fetches real-time data for charts
@@ -14,12 +19,17 @@ const WS_URL = typeof window !== 'undefined' && window.location.protocol === 'ht
  */
 export default function ChartWithRealTimeData({ chart, onEdit, onDuplicate, onDelete, className, wrapInCard = false, showActions = false }) {
   const [chartData, setChartData] = useState([]);
+  // `${xValue}|${field}` of readings the backend flagged as anomalies; drawn in red
+  const [anomalyKeys, setAnomalyKeys] = useState(() => anomalyKeysBySource.get(chart?.dataSource) || new Set());
   const [isLoading, setIsLoading] = useState(true);
   const abortControllerRef = useRef(null);
   const wsRef = useRef(null);
   const wsReconnectTimerRef = useRef(null);
   const wsStoppedRef = useRef(false);
-  
+  // The socket handler outlives renders; read the current chart config through a ref
+  const chartRef = useRef(chart);
+  chartRef.current = chart;
+
   const dataSource = chart?.dataSource;
   const dimension = chart?.dimension || chart?.options?.dimension || "2d";
   const aggregation = chart?.options?.aggregation || chart?.aggregation || "none";
@@ -117,6 +127,16 @@ export default function ChartWithRealTimeData({ chart, onEdit, onDuplicate, onDe
             const next = [...prev, ...incoming];
             return next.slice(-50);
           });
+          if (msg.anomaly && Array.isArray(msg.anomalies)) {
+            const xField = toRendererConfig(chartRef.current)?.mappings?.xField;
+            if (xField) {
+              const keys = incoming.flatMap((row) => msg.anomalies.map((a) => `${row?.[xField]}|${a.field}`));
+              const known = anomalyKeysBySource.get(dataSource) || new Set();
+              const next = new Set([...known, ...keys].slice(-MAX_ANOMALY_KEYS));
+              anomalyKeysBySource.set(dataSource, next);
+              setAnomalyKeys(next);
+            }
+          }
         } catch {
           // ignore
         }
@@ -283,7 +303,12 @@ export default function ChartWithRealTimeData({ chart, onEdit, onDuplicate, onDe
       // Render just the chart without wrapper (dashboard provides the card)
       return (
         <div className="w-full h-full">
-          <ChartRenderer chart={rendererChart} data={typeof inferredDataset !== 'undefined' ? inferredDataset : dataset} compact />
+          <ChartRenderer
+            chart={rendererChart}
+            data={typeof inferredDataset !== 'undefined' ? inferredDataset : dataset}
+            compact
+            highlightKeys={anomalyKeys}
+          />
         </div>
       );
     }

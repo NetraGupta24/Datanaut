@@ -10,6 +10,8 @@ import {
 } from "../utils/dynamicChartUtils.js";
 
 const BACKEND_URL = "http://localhost:8085"; // change if backend runs elsewhere
+const WS_URL = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss://localhost:8085" : "ws://localhost:8085";
+const MAX_ALERTS = 50;
 
 const formatNumber = (value) => {
   if (value >= 1000) {
@@ -17,6 +19,136 @@ const formatNumber = (value) => {
   }
   return value.toString();
 };
+
+const formatReading = (value) =>
+  typeof value === "number" ? value.toLocaleString(undefined, { maximumFractionDigits: 3 }) : String(value ?? "");
+
+const formatTime = (value) => {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleTimeString();
+};
+
+// One socket for the whole page that collects the anomalies the backend flags on any connection
+function useAnomalyAlerts() {
+  const [alerts, setAlerts] = useState([]);
+
+  useEffect(() => {
+    let ws = null;
+    let retryTimer = null;
+    let stopped = false;
+
+    const connect = () => {
+      if (stopped) return;
+      ws = new WebSocket(WS_URL);
+      const scheduleReconnect = () => {
+        if (stopped || retryTimer) return;
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          connect();
+        }, 2000);
+      };
+      ws.onerror = scheduleReconnect;
+      ws.onclose = scheduleReconnect;
+      ws.onmessage = (ev) => {
+        let msg;
+        try {
+          msg = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        if (msg?.type !== "update" || !msg.anomaly || !Array.isArray(msg.anomalies)) return;
+        const row = Array.isArray(msg.rows) ? msg.rows[0] : null;
+        const at = row?.timestamp || new Date().toISOString();
+        const device = row?.device_id ?? row?.deviceId ?? null;
+        const incoming = msg.anomalies.map((a) => ({
+          ...a,
+          key: `${msg.id}|${msg.topic}|${at}|${a.field}`,
+          connectionId: msg.id,
+          device,
+          at
+        }));
+        setAlerts((prev) => [...incoming, ...prev].slice(0, MAX_ALERTS));
+      };
+    };
+
+    connect();
+    return () => {
+      stopped = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      try {
+        if (ws) ws.close();
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
+
+  return [alerts, () => setAlerts([])];
+}
+
+function AnomalyAlerts({ alerts, connections, onClear }) {
+  const nameOf = (id) => connections.find((c) => c.id === id)?.config?.name || id;
+  return (
+    <GlassCard className="shadow-xl">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">Anomaly alerts</h2>
+          <p className="text-xs text-slate-500 dark:text-slate-300">
+            Live readings far from their recent values (rolling z-score; |z| above 3 by default).
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span
+            className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+              alerts.length
+                ? "bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-200"
+                : "bg-slate-100 text-slate-500 dark:bg-slate-800/60 dark:text-slate-300"
+            }`}
+          >
+            {alerts.length} {alerts.length === 1 ? "alert" : "alerts"}
+          </span>
+          {alerts.length ? (
+            <button
+              onClick={onClear}
+              className="glass-hover rounded-full border border-white/20 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600 transition hover:bg-white/10 dark:border-slate-200/20 dark:text-slate-300 dark:hover:bg-white/5"
+            >
+              Clear
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {alerts.length === 0 ? (
+        <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">No anomalies yet. Alerts appear here as live readings arrive.</p>
+      ) : (
+        <ul className="mt-3 max-h-64 space-y-2 overflow-auto pr-1" aria-live="polite">
+          {alerts.map((a) => (
+            <li
+              key={a.key}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-200 bg-red-50/80 px-3 py-2 text-sm text-red-800 dark:border-red-400/30 dark:bg-red-500/10 dark:text-red-200"
+            >
+              <div className="min-w-0">
+                <span className="font-semibold">
+                  {a.field} = {formatReading(a.value)}
+                </span>
+                <span className="ml-2 text-xs">
+                  usual {formatReading(a.mean)} ± {formatReading(a.std)}
+                </span>
+                <div className="truncate text-xs text-red-700/80 dark:text-red-300/80">
+                  {nameOf(a.connectionId)}
+                  {a.device ? ` · ${a.device}` : ""} · {formatTime(a.at)}
+                </div>
+              </div>
+              <span className="rounded-full bg-red-600 px-2 py-0.5 text-xs font-semibold tabular-nums text-white">
+                z = {a.score > 0 ? "+" : ""}
+                {a.score}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </GlassCard>
+  );
+}
 
 // Memoized chart card component to prevent unnecessary re-renders
 const ChartCard = React.memo(({ chart, connections, onEdit, onDuplicate, onDelete }) => {
@@ -96,6 +228,7 @@ export default function DynamicDashboard() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const navigate = useNavigate();
   const abortControllerRef = useRef(null);
+  const [anomalyAlerts, clearAnomalyAlerts] = useAnomalyAlerts();
 
   const normalizedCharts = useMemo(() => normalizeDynamicCharts(chartRecords), [chartRecords]);
   const { twoD: charts2D, threeD: charts3D } = useMemo(
@@ -322,6 +455,8 @@ export default function DynamicDashboard() {
           {statusMessage}
         </div>
       )}
+
+      <AnomalyAlerts alerts={anomalyAlerts} connections={connections} onClear={clearAnomalyAlerts} />
 
       {/* Charts Section - Referenced from static dashboard */}
       <section aria-labelledby="saved-charts" className="mt-4 space-y-4 md:mt-6">

@@ -49,7 +49,10 @@ const makeDomId = (chartId) => {
   return `chart-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 };
 
-export default function ChartRenderer({ chart, data = [], compact = false, skipValidation = false }) {
+const ANOMALY_COLOR = "#ef4444";
+
+// highlightKeys: optional Set of `${xValue}|${field}` points to draw in red (live anomaly alerts)
+export default function ChartRenderer({ chart, data = [], compact = false, skipValidation = false, highlightKeys }) {
   const containerRef = useRef(null);
   const chartDomIdRef = useRef(makeDomId(chart?.id));
   const [exporting, setExporting] = useState(false);
@@ -122,6 +125,19 @@ export default function ChartRenderer({ chart, data = [], compact = false, skipV
   );
 
   const ensureFieldsPresent = (requiredFields) => requiredFields.every((field) => field && typeof field === "string");
+
+  const hasHighlights = Boolean(highlightKeys && highlightKeys.size);
+  const isHighlighted = (row, field) => hasHighlights && highlightKeys.has(`${row?.[mappings.xField]}|${field}`);
+  const anomalyDot = (field) => (props) => {
+    const { cx, cy, payload, index } = props;
+    const key = `anomaly-${field}-${index}`;
+    if (cx == null || cy == null || !isHighlighted(payload, field)) return <g key={key} />;
+    return <circle key={key} cx={cx} cy={cy} r={5} fill={ANOMALY_COLOR} stroke="#ffffff" strokeWidth={1.5} />;
+  };
+  const anomalyCells = (field, color) =>
+    hasHighlights
+      ? safeData.map((row, index) => <Cell key={`cell-${index}`} fill={isHighlighted(row, field) ? ANOMALY_COLOR : color} />)
+      : null;
 
   const safeData = useMemo(() => {
     if (!mappedData.length) return [];
@@ -243,14 +259,29 @@ export default function ChartRenderer({ chart, data = [], compact = false, skipV
             {yFields.map((field, index) => {
               const color = seriesColors[field] || palette[index % palette.length];
               if (chartType === "line") {
-                return <Line key={field} type="monotone" dataKey={field} stroke={color} strokeWidth={2} dot={false} />;
+                return (
+                  <Line key={field} type="monotone" dataKey={field} stroke={color} strokeWidth={2} dot={hasHighlights ? anomalyDot(field) : false} />
+                );
               }
               if (chartType === "bar") {
                 return (
-                  <Bar key={field} dataKey={field} stackId={mappings.stacked ? "stack" : undefined} fill={color} radius={[6, 6, 0, 0]} />
+                  <Bar key={field} dataKey={field} stackId={mappings.stacked ? "stack" : undefined} fill={color} radius={[6, 6, 0, 0]}>
+                    {anomalyCells(field, color)}
+                  </Bar>
                 );
               }
-              return <Area key={field} type="monotone" dataKey={field} stroke={color} fill={`${color}80`} strokeWidth={2} stackId={mappings.stacked ? "stack" : undefined} />;
+              return (
+                <Area
+                  key={field}
+                  type="monotone"
+                  dataKey={field}
+                  stroke={color}
+                  fill={`${color}80`}
+                  strokeWidth={2}
+                  stackId={mappings.stacked ? "stack" : undefined}
+                  {...(hasHighlights ? { dot: anomalyDot(field) } : {})}
+                />
+              );
             })}
           </ChartComponent>
         </ResponsiveContainer>
@@ -274,7 +305,9 @@ export default function ChartRenderer({ chart, data = [], compact = false, skipV
             <XAxis type="number" dataKey={xField} stroke={axisColor} tick={{ fill: axisColor }} />
             <YAxis type="number" dataKey={yField} stroke={axisColor} tick={{ fill: axisColor }} />
             <Tooltip cursor={{ strokeDasharray: "3 3" }} {...tooltipStyles} />
-            <Scatter data={safeData} fill={defaultScatterColor} />
+            <Scatter data={safeData} fill={defaultScatterColor}>
+              {anomalyCells(yField, defaultScatterColor)}
+            </Scatter>
           </ScatterChart>
         </ResponsiveContainer>
       );

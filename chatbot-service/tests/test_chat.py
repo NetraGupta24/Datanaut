@@ -78,7 +78,7 @@ def test_tool_call_then_answer_with_evidence(chat_client, fake_groq):
     assert 'dataset named "Sales"' in system
     assert "Use only numbers from the profile or tool results; if they don't cover the question, say so." in system
     assert "- Revenue [number]:" in system
-    assert first["tool_choice"] == "auto" and len(first["tools"]) == 7
+    assert first["tool_choice"] == "auto" and len(first["tools"]) == 8
     tool_message = second["messages"][-1]
     assert tool_message["role"] == "tool" and json.loads(tool_message["content"])["rows"][0][0] == "South"
 
@@ -97,6 +97,31 @@ def test_history_is_sent_to_the_model(chat_client, fake_groq):
     assert ask(chat_client, ds_id, "How many rows?", history).status_code == 200
     roles = [m["role"] for m in fake_groq.requests[0]["messages"]]
     assert roles == ["system", "user", "assistant", "user"]
+
+
+def test_create_chart_is_returned_with_the_dataset_id(chat_client, fake_groq):
+    ds_id = upload(chat_client, SALES_CSV).json()["id"]
+    args = {"title": "Revenue by region", "chart_type": "bar", "x_field": "Region", "y_fields": ["Revenue"]}
+    fake_groq.responses = [
+        reply(tool_calls=[tool_call("create_chart", args)]),
+        reply(content="Here is revenue by region."),
+    ]
+    body = ask(chat_client, ds_id, "Chart revenue by region").json()
+    assert body["chart"] == {
+        "title": "Revenue by region",
+        "datasetId": ds_id,
+        "chartType": "bar",
+        "mappings": {"xField": "Region", "yFields": ["Revenue"], "stacked": False},
+        "options": {"aggregation": "sum", "topN": 0},
+    }
+    [evidence] = body["evidence"]
+    assert evidence["tool"] == "create_chart" and evidence["result_table"]["columns"] == ["Region", "sum(Revenue)"]
+    # The model sees the plotted data and a note, not the config
+    tool_message = json.loads(fake_groq.requests[1]["messages"][-1]["content"])
+    assert "chart" not in tool_message and "Add to dashboard" in tool_message["note"]
+
+    fake_groq.responses = [reply(content="South.")]
+    assert ask(chat_client, ds_id).json()["chart"] is None
 
 
 def test_tool_errors_go_back_to_the_model_and_are_not_evidence(chat_client, fake_groq):
@@ -153,13 +178,37 @@ def test_reasoning_effort_only_for_gpt_oss(fake_groq):
     assert "reasoning_effort" not in fake_groq.requests[1]
 
 
-def test_malformed_tool_call_from_groq_falls_back_to_plain_answer(chat_client, fake_groq):
-    ds_id = upload(chat_client, SALES_CSV).json()["id"]
+def rejected_tool_call(message="Tool call validation failed: missing properties: 'y_fields'"):
     request = httpx.Request("POST", "https://api.groq.com")
-    bad = groq.BadRequestError("tool_use_failed: invalid tool call", response=httpx.Response(400, request=request), body=None)
-    fake_groq.responses = [bad, reply(content="I couldn't run a calculation for that.")]
+    body = {"message": message, "code": "tool_use_failed"}
+    return groq.BadRequestError(message, response=httpx.Response(400, request=request), body=body)
+
+
+def test_tool_call_rejected_by_groq_is_retried_with_the_reason(chat_client, fake_groq):
+    ds_id = upload(chat_client, SALES_CSV).json()["id"]
+    fake_groq.responses = [
+        rejected_tool_call(),
+        reply(tool_calls=[tool_call("group_by", {"column": "Region", "metric": "Revenue"})]),
+        reply(content="South."),
+    ]
     res = ask(chat_client, ds_id)
-    assert res.status_code == 200 and res.json()["evidence"] == []
+    assert res.status_code == 200 and len(res.json()["evidence"]) == 1
+    retry = fake_groq.requests[1]
+    assert "tools" in retry and "missing properties: 'y_fields'" in retry["messages"][-1]["content"]
+
+
+def test_rejected_final_answer_falls_back_to_the_evidence(chat_client, fake_groq):
+    ds_id = upload(chat_client, SALES_CSV).json()["id"]
+    args = {"chart_type": "bar", "x_field": "Region", "y_fields": ["Revenue"]}
+    loop = [reply(tool_calls=[tool_call("create_chart", args, f"c{i}")]) for i in range(MAX_TOOL_ROUNDS)]
+    fake_groq.responses = loop + [rejected_tool_call("Tool choice is none, but model called a tool")]
+    res = ask(chat_client, ds_id)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["answer"] == "Here's the chart you asked for." and body["chart"]["title"] == "Revenue by Region"
+
+    fake_groq.responses = [reply(content="")]
+    assert ask(chat_client, ds_id).json()["answer"].startswith("I couldn't produce an answer")
 
 
 def test_unknown_and_legacy_datasets(chat_client, fake_metadata):

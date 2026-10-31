@@ -374,6 +374,90 @@ def outliers(df: pd.DataFrame, args: OutliersArgs) -> dict:
     return _table(columns, rows, note=f"{len(flagged)} outliers of {len(x)} values; {note}")
 
 
+# --- charts ---------------------------------------------------------------
+
+# Same chart types and aggregations as the Visualize page (src/utils/chartData.js)
+ChartType = Literal["line", "bar", "area", "scatter", "pie", "donut", "radar"]
+ChartAgg = Literal["none", "sum", "avg", "min", "max"]
+MAX_SERIES = 5
+MAX_SLICES = 20
+PANDAS_AGG = {"sum": "sum", "avg": "mean", "min": "min", "max": "max"}
+
+
+class CreateChartArgs(_Args):
+    chart_type: ChartType
+    x_field: str = Field(description="x-axis column; pie/donut/radar: the label column; scatter: a numeric column")
+    y_fields: list[str] = Field(
+        min_length=1, max_length=MAX_SERIES, description="Numeric column(s): 1-5 series for line/bar/area, exactly 1 otherwise"
+    )
+    title: str | None = Field(None, max_length=120)
+    aggregation: ChartAgg = Field(
+        "sum", description="How rows sharing an x value are combined; 'none' plots every row. Ignored for scatter."
+    )
+    top_n: int = Field(0, ge=0, le=MAX_RESULT_ROWS, description="Keep the n largest x groups (0 = all)")
+    stacked: bool = Field(False, description="bar/area: stack the series")
+
+
+def create_chart(df: pd.DataFrame, args: CreateChartArgs) -> dict:
+    """Validate a chart against the dataset and return its saved-chart config plus the data it will plot."""
+    kind, agg = args.chart_type, args.aggregation
+    values = list(dict.fromkeys(_numeric(df, y) for y in args.y_fields))
+    if kind not in ("line", "bar", "area") and len(values) > 1:
+        raise ToolError(f"A {kind} chart takes exactly one column in y_fields.")
+    if kind in ("line", "bar", "area"):
+        group = _column(df, args.x_field)
+        mappings = {"xField": group, "yFields": values, "stacked": args.stacked and kind != "line"}
+        title = f"{' & '.join(values)} by {group}"
+    elif kind == "scatter":
+        group = _numeric(df, args.x_field)
+        mappings = {"xField": group, "yField": values[0]}
+        title = f"{values[0]} vs {group}"
+        agg = "none"
+    else:
+        group = _column(df, args.x_field)
+        title = f"{values[0]} by {group}"
+        if kind == "radar":
+            mappings = {"angleField": group, "radiusField": values[0]}
+        else:
+            mappings = {"categoryField": group, "valueField": values[0]}
+            if kind == "donut":
+                mappings["donut"] = True
+            agg = "sum" if agg == "none" else agg  # the dashboard always combines pie slices
+    if group in values:
+        raise ToolError(f"{group!r} can't be both the axis/category and a value column.")
+    if args.top_n and agg == "none":
+        raise ToolError("top_n only works with an aggregation (sum, avg, min or max).")
+
+    data = df.dropna(subset=[group])
+    if agg == "none":
+        plotted = data.dropna(subset=values, how="all")[[group, *values]]
+        columns, rows = [group, *values], plotted.values.tolist()
+        what = f"{len(plotted)} {'points' if kind == 'scatter' else 'rows'}"
+    else:
+        grouped = data.groupby(group, sort=False)[values].agg(PANDAS_AGG[agg])
+        if args.top_n:
+            grouped = grouped.sort_values(values[0], ascending=False).head(args.top_n)
+        if kind in ("pie", "donut", "radar") and len(grouped) > MAX_SLICES:
+            raise ToolError(
+                f"{group!r} has {len(grouped)} distinct values, too many for a {kind} chart. "
+                f"Set top_n (at most {MAX_SLICES}) or use a bar chart."
+            )
+        columns = [group, *(f"{agg}({v})" for v in values)]
+        rows = [[k, *row] for k, row in zip(grouped.index, grouped.values.tolist())]
+        what = f"{len(grouped)} {group} groups"
+    if not rows:
+        raise ToolError("No rows have values for these columns.")
+
+    chart = {
+        "title": (args.title or "").strip() or title,
+        "chartType": kind,
+        "mappings": mappings,
+        "options": {"aggregation": agg, "topN": args.top_n},
+    }
+    note = f"{kind} chart ready ({what}); the chat shows a preview with an 'Add to dashboard' button"
+    return {**_table(columns, rows, note=note), "chart": chart}
+
+
 # --- registry -------------------------------------------------------------
 
 
@@ -385,6 +469,11 @@ TOOLS: dict[str, tuple[type[_Args], Callable[[pd.DataFrame, Any], dict], str]] =
     "compare": (CompareArgs, compare, "Compare a numeric metric between two values of a column."),
     "correlation": (CorrelationArgs, correlation, "Pearson and Spearman correlation between two numeric columns."),
     "outliers": (OutliersArgs, outliers, "Find outliers in a numeric column with IQR or z-score."),
+    "create_chart": (
+        CreateChartArgs,
+        create_chart,
+        "Build a dashboard chart (line, bar, area, scatter, pie, donut or radar) when the user asks for a chart, graph or plot.",
+    ),
 }
 
 

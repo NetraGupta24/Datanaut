@@ -3,7 +3,9 @@ export default {
   darkMode: "class",
   content: [
     "./index.html",
-    "./src/**/*.{js,jsx,ts,tsx}",
+    // Frontend folders only: src/backend has its own node_modules, which must not be scanned
+    "./src/*.{js,jsx,ts,tsx}",
+    "./src/{hooks,pages,providers,styles,ui,utils}/**/*.{js,jsx,ts,tsx}",
   ],
   theme: {
     extend: {

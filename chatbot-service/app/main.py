@@ -16,7 +16,7 @@ from .config import MAX_ROWS_PER_REQUEST, Settings, get_settings
 from .ingest import IngestError, load_dataframe, preview_records, rows_to_json
 from .llm import ChatEngine, ChatServiceError, make_groq_client
 from .metadata import FirestoreMetadata, MetadataStore
-from .models import ChatRequest, ChatResponse, DatasetMetadata, DeleteResult
+from .models import ChartConfig, ChatRequest, ChatResponse, DatasetMetadata, DeleteResult
 from .profiling import profile_dataframe
 from .storage import CachedStorage, DatasetNotFound, DatasetStorage, LocalStorage
 
@@ -207,4 +207,5 @@ def chat(
         result = engine.answer(df, meta.get("name", "dataset"), meta["profile"], history, body.message)
     except ChatServiceError as exc:
         raise HTTPException(exc.status, str(exc)) from exc
-    return ChatResponse(answer=result.answer, evidence=result.evidence)
+    chart = ChartConfig(datasetId=body.dataset_id, **result.chart) if result.chart else None
+    return ChatResponse(answer=result.answer, evidence=result.evidence, chart=chart)

@@ -4,7 +4,9 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "simulate": "node scripts/sensorSimulator.js",
+    "test": "node --test anomalyDetector.test.js"
   },
   "dependencies": {
     "axios": "^1.13.1",

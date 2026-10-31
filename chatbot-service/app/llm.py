@@ -30,6 +30,7 @@ Rules:
 - Use exact column names from the profile.
 - Keep answers short: a few sentences or a brief "-" bullet list. Mention the filters and aggregation you used.
 - Format as plain text. **Bold** is fine; no Markdown tables or headings (the chat widget shows tool tables separately).
+- When the user asks for a chart, graph or plot, call create_chart once. The chat shows the chart with an "Add to dashboard" button, so describe it in a sentence and don't explain how to build it by hand.
 - If a tool returns an error, fix the arguments and try again, or explain what is missing.
 - If the question is not about this dataset, say what you can help with instead."""
 
@@ -42,10 +43,28 @@ class ChatServiceError(Exception):
         self.status = status
 
 
+class ToolCallRejected(Exception):
+    """Groq refused the model's tool call (arguments not matching the schema, or a tool when none was allowed)."""
+
+
+def _groq_error_message(exc: groq.APIStatusError) -> str:
+    body = exc.body if isinstance(exc.body, dict) else {}
+    return str(body.get("message") or exc)[:500]
+
+
 @dataclass
 class ChatResult:
     answer: str
     evidence: list[dict] = field(default_factory=list)
+    chart: dict | None = None  # create_chart config (no datasetId yet)
+
+
+def _fallback_answer(chart: dict | None, evidence: list[dict]) -> str:
+    if chart:
+        return "Here's the chart you asked for."
+    if evidence:
+        return "I couldn't write a summary, but the results I calculated are below."
+    return "I couldn't produce an answer. Please rephrase the question."
 
 
 def build_messages(name: str, profile: dict, history: list[dict], message: str) -> list[dict]:
@@ -90,10 +109,9 @@ class ChatEngine:
             logger.error("Groq model %r is not available: %s", self.model, exc)
             raise ChatServiceError(502, f"The AI model '{self.model}' isn't available. Set GROQ_MODEL in chatbot-service/.env.") from exc
         except groq.BadRequestError as exc:
-            # Llama occasionally emits a malformed tool call; let the caller retry without tools
-            if allow_tools and "tool" in str(exc).lower():
+            if "tool" in str(exc).lower():
                 logger.warning("Groq rejected a tool call: %s", exc)
-                return None
+                raise ToolCallRejected(_groq_error_message(exc)) from exc
             raise ChatServiceError(502, "The AI service rejected the request.") from exc
         except (groq.APIConnectionError, groq.APIStatusError) as exc:
             logger.warning("Groq request failed: %s", exc)
@@ -102,15 +120,22 @@ class ChatEngine:
     def answer(self, df: pd.DataFrame, name: str, profile: dict, history: list[dict], message: str) -> ChatResult:
         messages = build_messages(name, profile, history, message)
         evidence: list[dict] = []
+        chart = None
 
         for _ in range(MAX_TOOL_ROUNDS):
-            response = self._complete(messages, allow_tools=True)
-            if response is None:
-                break
+            try:
+                response = self._complete(messages, allow_tools=True)
+            except ToolCallRejected as exc:
+                # No tool_call_id to answer, so tell the model in a user turn and let it try again
+                messages.append(
+                    {"role": "user", "content": f"Your tool call was rejected: {exc}. Call the tool again with valid arguments."}
+                )
+                continue
             reply = response.choices[0].message
             tool_calls = list(reply.tool_calls or [])[:MAX_TOOL_CALLS_PER_ROUND]
             if not tool_calls:
-                return ChatResult(answer=(reply.content or "").strip() or "I couldn't produce an answer.", evidence=evidence)
+                answer = (reply.content or "").strip() or _fallback_answer(chart, evidence)
+                return ChatResult(answer=answer, evidence=evidence, chart=chart)
 
             messages.append(
                 {
@@ -124,19 +149,28 @@ class ChatEngine:
             )
             for call in tool_calls:
                 args, result = run_tool(df, call.function.name, call.function.arguments)
+                # The chart config goes to the client, not back to the model; the latest chart wins
+                chart = result.pop("chart", None) or chart
                 if args is not None:
                     evidence.append({"tool": call.function.name, "args": args, "result_table": result})
                 messages.append(
                     {"role": "tool", "tool_call_id": call.id, "content": json.dumps(result, ensure_ascii=False, default=str)}
                 )
 
-        # Out of tool rounds (or tools failed): ask for a final answer from what we have
+        # Out of tool rounds: ask for a final answer from what we have
         messages.append(
-            {"role": "user", "content": "Answer now using only the tool results above. If they are not enough, say so."}
+            {
+                "role": "user",
+                "content": "Answer now in plain text using only the tool results above, without calling tools. "
+                "If they are not enough, say so.",
+            }
         )
-        response = self._complete(messages, allow_tools=False)
-        content = (response.choices[0].message.content or "").strip() if response else ""
-        return ChatResult(answer=content or "I couldn't produce an answer. Please rephrase the question.", evidence=evidence)
+        try:
+            response = self._complete(messages, allow_tools=False)
+            content = (response.choices[0].message.content or "").strip()
+        except ToolCallRejected:
+            content = ""  # gpt-oss sometimes reaches for its built-in python tool here
+        return ChatResult(answer=content or _fallback_answer(chart, evidence), evidence=evidence, chart=chart)
 
 
 def make_groq_client(api_key: str, timeout_s: float):
