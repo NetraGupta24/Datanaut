@@ -2,8 +2,7 @@ import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useStore } from "../providers/StoreContext.jsx";
 import GlassCard from "../ui/GlassCard.jsx";
-import ChartRenderer from "../ui/ChartRenderer.jsx";
-import { buildChartData } from "../utils/chartData.js";
+import DatasetChart from "../ui/DatasetChart.jsx";
 
 const formatNumber = (value) => {
   if (value >= 1000) {
@@ -122,8 +121,6 @@ export default function DashboardPage() {
           <div className="grid gap-4 sm:gap-6 lg:grid-cols-2">
             {chartList.map((chart) => {
               const dataset = datasets[chart.datasetId];
-              const rows = dataset?.data || dataset?.rowsPreview || [];
-              const chartData = buildChartData(rows, chart.chartType, chart.mappings, chart.options || {});
               return (
                 <GlassCard key={chart.id} className="flex flex-col gap-3 shadow-xl">
                   <div className="flex flex-wrap items-center justify-between gap-3">
@@ -155,7 +152,7 @@ export default function DashboardPage() {
                     </div>
                   </div>
                   <div className="flex-1 rounded-2xl bg-slate-50 p-4 transition-colors dark:bg-slate-800/50">
-                    <ChartRenderer chart={chart} data={chartData} compact />
+                    <DatasetChart chart={chart} dataset={dataset} compact />
                   </div>
                   <div className="grid gap-3 text-xs text-slate-500 sm:grid-cols-3 dark:text-slate-300">
                     <div className="rounded-xl bg-slate-100 px-3 py-2 transition-colors dark:bg-slate-800/60">

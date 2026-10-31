@@ -207,5 +207,6 @@ export const fetchPublicGoogleCsv = async (url, options) => {
     throw new Error("Failed to fetch Google Sheets data. Check the URL and access permissions.");
   }
   const text = await response.text();
-  return parseCSVText(text, options);
+  // rawText lets the Data page upload the original CSV to the data service
+  return { ...(await parseCSVText(text, options)), rawText: text };
 };

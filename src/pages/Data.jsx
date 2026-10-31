@@ -13,7 +13,7 @@ import DataPreviewTable from "../ui/DataPreviewTable.jsx";
 const nowIso = () => new Date().toISOString();
 
 export default function DataPage() {
-  const { datasets, saveDataset, deleteDataset, generateId } = useStore();
+  const { datasets, saveDataset, uploadDataset, deleteDataset, generateId, usesServerStorage } = useStore();
   const navigate = useNavigate();
   const {
     register,
@@ -32,7 +32,8 @@ export default function DataPage() {
   const [firstRowHeader, setFirstRowHeader] = useState(true);
   const [activePreview, setActivePreview] = useState(null);
   const [activeSource, setActiveSource] = useState(null);
-  const [statusMessage, setStatusMessage] = useState("");
+  const [status, setStatus] = useState({ message: "", error: false });
+  const setStatusMessage = (message, error = false) => setStatus({ message, error });
   const [loading, setLoading] = useState(false);
   // allow user to opt-in to storing full dataset (may impact performance)
   const [storeFullData, setStoreFullData] = useState(false);
@@ -96,8 +97,8 @@ export default function DataPage() {
       setValue("datasetName", file.name.replace(/\.[^/.]+$/, "").replace(/[_-]+/g, " "));
     } catch (error) {
       console.error(error);
-      setStatusMessage(error.message || "Failed to parse file.");
       resetPreview();
+      setStatusMessage(error.message || "Failed to parse file.", true);
     } finally {
       setLoading(false);
     }
@@ -126,12 +127,17 @@ export default function DataPage() {
     setStatusMessage("Fetching Google Sheet...");
     try {
       const parsed = await fetchPublicGoogleCsv(url, { firstRowHeader });
-      processResult(parsed, { kind: "google", url: transformGoogleSheetsUrl(url), supportsHeaderToggle: true });
+      processResult(parsed, {
+        kind: "google",
+        url: transformGoogleSheetsUrl(url),
+        rawText: parsed.rawText,
+        supportsHeaderToggle: true
+      });
       setValue("datasetName", "Google Sheet Dataset");
     } catch (error) {
       console.error(error);
-      setStatusMessage(error.message || "Failed to fetch Google Sheets data.");
       resetPreview();
+      setStatusMessage(error.message || "Failed to fetch Google Sheets data.", true);
     } finally {
       setLoading(false);
     }
@@ -146,14 +152,49 @@ export default function DataPage() {
     setActivePreview((prev) => (prev ? { ...prev, ...rebuilt } : prev));
   };
 
+  // Signed-in users: send the original file to the data service, which stores every row
+  const saveToServer = async (datasetName) => {
+    const file =
+      activeSource?.kind === "google"
+        ? new File([activeSource.rawText || ""], "google-sheet.csv", { type: "text/csv" })
+        : activeSource?.file;
+    if (!file) {
+      setStatusMessage("Import the data again before saving.", true);
+      return;
+    }
+    setLoading(true);
+    setStatusMessage(`Uploading "${datasetName}"...`);
+    try {
+      const saved = await uploadDataset({
+        file,
+        name: datasetName,
+        sourceType: activeSource?.kind || "file",
+        firstRowHeader: activeSource?.supportsHeaderToggle === false ? true : firstRowHeader
+      });
+      resetField("datasetName");
+      resetField("googleUrl");
+      resetPreview();
+      setStatusMessage(`Saved dataset "${saved.name}" (${saved.originalRowCount.toLocaleString()} rows).`);
+    } catch (err) {
+      console.error(err);
+      setStatusMessage(`Couldn't save "${datasetName}": ${err.message}`, true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const onSaveDataset = () => {
     if (!activePreview) {
-      setStatusMessage("Load and preview data before saving.");
+      setStatusMessage("Load and preview data before saving.", true);
       return;
     }
     const datasetName = watch("datasetName")?.trim();
     if (!datasetName) {
-      setStatusMessage("Dataset name is required.");
+      setStatusMessage("Dataset name is required.", true);
+      return;
+    }
+    if (usesServerStorage) {
+      saveToServer(datasetName);
       return;
     }
     const id = generateId();
@@ -212,7 +253,7 @@ export default function DataPage() {
         }
       } catch (err) {
         console.error(err);
-        setStatusMessage(err?.message || "Failed to save dataset.");
+        setStatusMessage(err?.message || "Failed to save dataset.", true);
         return Promise.reject(err);
       }
     };
@@ -253,7 +294,7 @@ export default function DataPage() {
         resetPreview();
       } catch (err) {
         console.error(err);
-        setStatusMessage(err?.message || "Failed to save dataset.");
+        setStatusMessage(err?.message || "Failed to save dataset.", true);
       }
       return;
     }
@@ -268,7 +309,10 @@ export default function DataPage() {
 
   const onDeleteDataset = (id, name) => {
     if (window.confirm(`Delete dataset "${name}"? This also removes linked charts.`)) {
-      deleteDataset(id);
+      Promise.resolve(deleteDataset(id)).catch((err) => {
+        console.error(err);
+        setStatusMessage(`Couldn't delete "${name}": ${err.message}`, true);
+      });
       setExpandedId((current) => (current === id ? null : current));
     }
   };
@@ -326,15 +370,17 @@ export default function DataPage() {
               className="rounded-xl border border-slate-200 dark:border-slate-600 px-3 py-2 text-sm shadow-sm focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-200"
               {...register("datasetName", { required: "Dataset name is required" })}
             />
-            <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 mt-2">
-              <input
-                type="checkbox"
-                checked={storeFullData}
-                onChange={(e) => setStoreFullData(e.target.checked)}
-                className="h-4 w-4 rounded border-slate-300 text-brand-500 focus:ring-brand-400"
-              />
-              Store full dataset (will persist only the last 1,000 rows)
-            </label>
+            {usesServerStorage ? null : (
+              <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 mt-2">
+                <input
+                  type="checkbox"
+                  checked={storeFullData}
+                  onChange={(e) => setStoreFullData(e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300 text-brand-500 focus:ring-brand-400"
+                />
+                Store full dataset (will persist only the last 1,000 rows)
+              </label>
+            )}
           </div>
           <div className="mt-6 flex items-center justify-between rounded-xl bg-slate-50 dark:bg-slate-800/50 px-4 py-3">
             <label
@@ -360,7 +406,14 @@ export default function DataPage() {
               Save dataset
             </button>
           </div>
-          {statusMessage ? <p className="mt-4 text-sm text-slate-500 dark:text-slate-300">{statusMessage}</p> : null}
+          {status.message ? (
+            <p
+              role={status.error ? "alert" : undefined}
+              className={`mt-4 text-sm ${status.error ? "text-red-600 dark:text-red-400" : "text-slate-500 dark:text-slate-300"}`}
+            >
+              {status.message}
+            </p>
+          ) : null}
         </div>
 
         <div className="rounded-2xl bg-white dark:bg-slate-800/80 p-6 shadow-sm flex flex-col min-h-0">
@@ -448,7 +501,7 @@ export default function DataPage() {
                               maxHeight={240}
                               totalRows={preview.totalRows}
                             />
-                            {preview.totalRows > preview.rows.length ? (
+                            {preview.totalRows > preview.rows.length && !dataset.storagePath ? (
                               <p className="text-[11px] text-slate-500 dark:text-slate-400">
                                 Showing preview rows only. Re-import with &ldquo;Store full dataset&rdquo; enabled to persist additional rows.
                               </p>
@@ -470,8 +523,10 @@ export default function DataPage() {
         <div className="rounded-2xl bg-brand-50 p-5 text-sm text-brand-900 ring-1 ring-inset ring-brand-100">
           <h3 className="text-base font-semibold text-brand-900">Need tips?</h3>
           <p className="mt-2">
-            Ensure Google Sheets are shared as &ldquo;Anyone with the link&rdquo; and use the fetch button. Parsed datasets persist in
-            localStorage until you clear them.
+            Ensure Google Sheets are shared as &ldquo;Anyone with the link&rdquo; and use the fetch button.{" "}
+            {usesServerStorage
+              ? "Saved datasets are stored in full by the DATANAUT data service; charts load up to 50,000 rows."
+              : "Parsed datasets persist in localStorage until you clear them."}
           </p>
         </div>
       </aside>

@@ -1,5 +1,7 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { parseCSVText, parseJSONText } from "../utils/parseData.js";
+import { deleteDatasetRemote, uploadDatasetFile } from "../utils/datasetApi.js";
+import { forgetDatasetRows } from "../hooks/useDatasetRows.js";
 import { db, DEMO_MODE } from "../firebase.js";
 import { useAuth } from "./AuthContext.jsx";
 import {
@@ -18,6 +20,18 @@ const CHARTS_KEY = "charts";
 const SEED_FLAG_KEY = "seeded";
 
 const nowIso = () => new Date().toISOString();
+
+const SAMPLE_FILES = [
+  { path: "/samples/sample_sales.csv", name: "Sample Sales", sourceType: "sample_csv" },
+  { path: "/samples/sample_scatter.csv", name: "Sample Scatter", sourceType: "sample_csv" },
+  { path: "/samples/sample_pie.json", name: "Sample Categories", sourceType: "sample_json" }
+];
+
+const sampleCharts = (salesId, scatterId, pieId) => [
+  { title: "Revenue by Month", datasetId: salesId, chartType: "bar", mappings: { xField: "Month", yFields: ["Revenue"], stacked: false }, options: { aggregation: "none", topN: 0 } },
+  { title: "Units vs Revenue", datasetId: scatterId, chartType: "scatter", mappings: { xField: "Units", yField: "Revenue" }, options: { aggregation: "none", topN: 0 } },
+  { title: "Share by Category", datasetId: pieId, chartType: "donut", mappings: { categoryField: "category", valueField: "value", donut: true }, options: { aggregation: "sum", topN: 0 } }
+];
 
 export const generateId = () => {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
@@ -44,12 +58,16 @@ export function StoreProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const [seeding, setSeeding] = useState(false);
   const [seeded, setSeeded] = useState(false);
+  // One seeding attempt per user per session, so a failing API isn't retried in a loop
+  const seedAttempted = useRef(false);
 
-  // Demo users have no real Firebase session, so their data stays in localStorage
+  // Demo users have no real Firebase session, so their data stays in localStorage.
+  // Signed-in users keep metadata in Firestore and full rows in the data service.
   const isFirestoreAvailable = !!db && !!user && !DEMO_MODE;
 
   // ─── Load data ───────────────────────────────────────────────
   useEffect(() => {
+    seedAttempted.current = false;
     if (!isFirestoreAvailable) {
       // Not logged in (or demo mode) — use localStorage
       const storedDatasets = safeParse(localStorage.getItem(DATASETS_KEY));
@@ -110,10 +128,36 @@ export function StoreProvider({ children }) {
   }, [charts, loading, isFirestoreAvailable]);
 
   // ─── Seed samples ─────────────────────────────────────────────
+  // Signed in: upload the sample files to the data service, then save charts pointing at them
+  const seedSamplesRemote = useCallback(async () => {
+    const created = [];
+    for (const sample of SAMPLE_FILES) {
+      const blob = await (await fetch(sample.path)).blob();
+      const file = new File([blob], sample.path.split("/").pop(), { type: blob.type });
+      const meta = await uploadDatasetFile({ file, name: sample.name, sourceType: sample.sourceType });
+      created.push(meta);
+      setDatasets((prev) => ({ ...prev, [meta.id]: meta }));
+    }
+    const chartNow = nowIso();
+    const batch = writeBatch(db);
+    sampleCharts(...created.map((meta) => meta.id)).forEach((item) => {
+      const id = generateId();
+      batch.set(doc(db, "users", user.uid, "charts", id), { id, ...item, createdAt: chartNow, updatedAt: chartNow });
+    });
+    await batch.commit();
+  }, [user]);
+
   const seedSamples = useCallback(async () => {
-    if (seeding) return;
+    if (seeding || seedAttempted.current) return;
+    seedAttempted.current = true;
     setSeeding(true);
     try {
+      if (isFirestoreAvailable) {
+        await seedSamplesRemote();
+        setSeeded(true);
+        return;
+      }
+
       const [salesResp, scatterResp, pieResp] = await Promise.all([
         fetch("/samples/sample_sales.csv"),
         fetch("/samples/sample_scatter.csv"),
@@ -140,37 +184,22 @@ export function StoreProvider({ children }) {
         [pieId]: { id: pieId, name: "Sample Categories", sourceType: "sample_json", schema: { headers: pieParsed.headers, types: pieParsed.types }, rowsPreview: pieParsed.rows.slice(0, 50), data: pieParsed.rows, createdAt: chartNow, updatedAt: chartNow }
       };
 
-      const seededCharts = [
-        { title: "Revenue by Month", datasetId: salesId, chartType: "bar", mappings: { xField: "Month", yFields: ["Revenue"], stacked: false }, options: { aggregation: "none", topN: 0 } },
-        { title: "Units vs Revenue", datasetId: scatterId, chartType: "scatter", mappings: { xField: "Units", yField: "Revenue" }, options: { aggregation: "none", topN: 0 } },
-        { title: "Share by Category", datasetId: pieId, chartType: "donut", mappings: { categoryField: "category", valueField: "value", donut: true }, options: { aggregation: "sum", topN: 0 } }
-      ].reduce((acc, item) => {
+      const seededCharts = sampleCharts(salesId, scatterId, pieId).reduce((acc, item) => {
         const id = generateId();
         acc[id] = { id, ...item, createdAt: chartNow, updatedAt: chartNow };
         return acc;
       }, {});
 
-      if (isFirestoreAvailable) {
-        const batch = writeBatch(db);
-        Object.values(seededDatasets).forEach((ds) => {
-          batch.set(doc(db, "users", user.uid, "datasets", ds.id), ds);
-        });
-        Object.values(seededCharts).forEach((ch) => {
-          batch.set(doc(db, "users", user.uid, "charts", ch.id), ch);
-        });
-        await batch.commit();
-      } else {
-        setDatasets(seededDatasets);
-        setCharts(seededCharts);
-        localStorage.setItem(SEED_FLAG_KEY, "true");
-      }
+      setDatasets(seededDatasets);
+      setCharts(seededCharts);
+      localStorage.setItem(SEED_FLAG_KEY, "true");
       setSeeded(true);
     } catch (error) {
       console.error("Failed to seed samples", error);
     } finally {
       setSeeding(false);
     }
-  }, [seeding, isFirestoreAvailable, user]);
+  }, [seeding, isFirestoreAvailable, seedSamplesRemote]);
 
   useEffect(() => {
     if (!loading && !seeded && Object.keys(datasets).length === 0 && Object.keys(charts).length === 0) {
@@ -179,6 +208,7 @@ export function StoreProvider({ children }) {
   }, [datasets, charts, loading, seedSamples, seeded]);
 
   // ─── CRUD operations ──────────────────────────────────────────
+  // Local (demo) datasets only; signed-in users go through uploadDataset
   const saveDataset = useCallback(async (dataset) => {
     if (isFirestoreAvailable) {
       await setDoc(doc(db, "users", user.uid, "datasets", dataset.id), dataset);
@@ -187,14 +217,22 @@ export function StoreProvider({ children }) {
     }
   }, [isFirestoreAvailable, user]);
 
+  // Sends the original file to the data service, which stores the full table and
+  // writes the metadata doc; the Firestore listener then keeps it in sync.
+  const uploadDataset = useCallback(async ({ file, name, sourceType, firstRowHeader }) => {
+    if (!isFirestoreAvailable) {
+      throw new Error("Uploading to the data service requires a signed-in Firebase user.");
+    }
+    const meta = await uploadDatasetFile({ file, name, sourceType, firstRowHeader });
+    setDatasets((prev) => ({ ...prev, [meta.id]: meta }));
+    return meta;
+  }, [isFirestoreAvailable]);
+
   const deleteDataset = useCallback(async (datasetId) => {
     if (isFirestoreAvailable) {
-      await deleteDoc(doc(db, "users", user.uid, "datasets", datasetId));
-      // delete linked charts
-      const linkedCharts = Object.values(charts).filter(c => c.datasetId === datasetId);
-      await Promise.all(linkedCharts.map(c =>
-        deleteDoc(doc(db, "users", user.uid, "charts", c.id))
-      ));
+      // The service removes the stored file, the metadata doc and linked charts
+      await deleteDatasetRemote(datasetId);
+      forgetDatasetRows(datasetId);
     } else {
       setDatasets((prev) => { const next = { ...prev }; delete next[datasetId]; return next; });
       setCharts((prev) => {
@@ -203,7 +241,7 @@ export function StoreProvider({ children }) {
         return next;
       });
     }
-  }, [isFirestoreAvailable, user, charts]);
+  }, [isFirestoreAvailable]);
 
   const saveChart = useCallback(async (chart) => {
     if (isFirestoreAvailable) {
@@ -231,10 +269,11 @@ export function StoreProvider({ children }) {
 
   const value = useMemo(() => ({
     datasets, charts, loading,
-    saveDataset, deleteDataset,
+    usesServerStorage: isFirestoreAvailable,
+    saveDataset, uploadDataset, deleteDataset,
     saveChart, deleteChart,
     duplicateChart, generateId
-  }), [charts, datasets, deleteChart, deleteDataset, duplicateChart, loading, saveChart, saveDataset]);
+  }), [charts, datasets, deleteChart, deleteDataset, duplicateChart, isFirestoreAvailable, loading, saveChart, saveDataset, uploadDataset]);
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }

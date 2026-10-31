@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useStore } from "../providers/StoreContext.jsx";
-import ChartRenderer from "./ChartRenderer.jsx";
 import ChartWithRealTimeData from "./ChartWithRealTimeData.jsx";
-import { buildChartData } from "../utils/chartData.js";
+import DatasetChart from "./DatasetChart.jsx";
 import GlassCard from "./GlassCard.jsx";
 
 const BACKEND_URL = "http://localhost:8085";
@@ -292,15 +291,6 @@ export default function PresentationMode() {
 function ChartSelectionCard({ chart, isSelected, onToggle }) {
   const { datasets } = useStore();
 
-  const chartPreview = useMemo(() => {
-    if (chart.source === "static") {
-      const dataset = datasets[chart.datasetId];
-      const rows = dataset?.data || dataset?.rowsPreview || [];
-      return buildChartData(rows, chart.chartType, chart.mappings, chart.options || {});
-    }
-    return null;
-  }, [chart, datasets]);
-
   const handleCheckboxChange = (e) => {
     e.stopPropagation();
     onToggle();
@@ -329,8 +319,8 @@ function ChartSelectionCard({ chart, isSelected, onToggle }) {
       </div>
 
       <div className="flex-1 rounded-2xl bg-slate-50 p-4 transition-colors dark:bg-slate-800/50 min-h-[200px]">
-        {chart.source === "static" && chartPreview ? (
-          <ChartRenderer chart={chart} data={chartPreview} compact skipValidation />
+        {chart.source === "static" ? (
+          <DatasetChart chart={chart} dataset={datasets[chart.datasetId]} compact skipValidation />
         ) : chart.source === "dynamic" ? (
           <div className="flex items-center justify-center h-full text-sm text-slate-500 dark:text-slate-400">
             <div className="text-center">
@@ -380,15 +370,6 @@ function PresentationScreen({ chartId, onExit, onNext, onPrev, currentIndex, tot
       return dynamicCharts.find((c) => c.id === id);
     }
   }, [source, id, staticCharts, dynamicCharts]);
-
-  const chartData = useMemo(() => {
-    if (source === "static" && chart) {
-      const dataset = datasets[chart.datasetId];
-      const rows = dataset?.data || dataset?.rowsPreview || [];
-      return buildChartData(rows, chart.chartType, chart.mappings, chart.options || {});
-    }
-    return null;
-  }, [source, chart, datasets]);
 
   useEffect(() => {
     if (source === "dynamic") {
@@ -450,7 +431,7 @@ function PresentationScreen({ chartId, onExit, onNext, onPrev, currentIndex, tot
             <div className="flex-1 flex flex-col">
               <h2 className="text-2xl font-bold text-white mb-4">{chart.title}</h2>
               <div className="flex-1 bg-slate-900 rounded-lg overflow-hidden">
-                <ChartRenderer chart={chart} data={chartData} skipValidation />
+                <DatasetChart chart={chart} dataset={datasets[chart.datasetId]} skipValidation />
               </div>
             </div>
           ) : (

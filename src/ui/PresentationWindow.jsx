@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useStore } from "../providers/StoreContext.jsx";
-import ChartRenderer from "./ChartRenderer.jsx";
 import ChartWithRealTimeData from "./ChartWithRealTimeData.jsx";
-import { buildChartData } from "../utils/chartData.js";
+import DatasetChart from "./DatasetChart.jsx";
 
 const BACKEND_URL = "http://localhost:8085";
 
@@ -10,7 +9,6 @@ export default function PresentationWindow() {
   const { charts: staticCharts, datasets } = useStore();
   const [dynamicCharts, setDynamicCharts] = useState([]);
   const [chart, setChart] = useState(null);
-  const [chartData, setChartData] = useState(null);
   const [loading, setLoading] = useState(true);
   const abortControllerRef = useRef(null);
 
@@ -38,10 +36,6 @@ export default function PresentationWindow() {
       const foundChart = staticCharts[id];
       if (foundChart) {
         setChart(foundChart);
-        const dataset = datasets[foundChart.datasetId];
-        const rows = dataset?.data || dataset?.rowsPreview || [];
-        const data = buildChartData(rows, foundChart.chartType, foundChart.mappings, foundChart.options || {});
-        setChartData(data);
       }
       setLoading(false);
     } else if (source === "dynamic") {
@@ -146,7 +140,7 @@ export default function PresentationWindow() {
             <div className="flex-1 flex flex-col">
               <h2 className="text-2xl font-bold text-white mb-4">{chart.title}</h2>
               <div className="flex-1 bg-slate-900 rounded-lg overflow-hidden">
-                <ChartRenderer chart={chart} data={chartData} skipValidation />
+                <DatasetChart chart={chart} dataset={datasets[chart.datasetId]} skipValidation />
               </div>
             </div>
           ) : (

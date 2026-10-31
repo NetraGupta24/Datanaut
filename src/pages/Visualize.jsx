@@ -3,6 +3,8 @@ import { useForm } from "react-hook-form";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useStore } from "../providers/StoreContext.jsx";
 import ChartRenderer from "../ui/ChartRenderer.jsx";
+import { ChartStatus, TruncationNote } from "../ui/DatasetChart.jsx";
+import { useDatasetRows } from "../hooks/useDatasetRows.js";
 import { buildChartData } from "../utils/chartData.js";
 import { defaultPalette } from "../utils/colors.js";
 
@@ -239,7 +241,13 @@ export default function VisualizePage() {
     }
   }, [editingChart, selectedDataset, setSearchParams]);
 
-  const datasetRows = selectedDataset?.data || selectedDataset?.rowsPreview || [];
+  const {
+    rows: datasetRows,
+    total: datasetTotal,
+    loading: rowsLoading,
+    error: rowsError,
+    truncated: rowsTruncated
+  } = useDatasetRows(selectedDataset);
 
   const previewData = useMemo(
     () => buildChartData(datasetRows, chartType, mappings, options),
@@ -296,9 +304,15 @@ export default function VisualizePage() {
       createdAt: editingChart?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
-    saveChart(payload);
-    setSearchParams({ chartId: id });
-    setStatusMessage(`Saved chart "${payload.title}".`);
+    Promise.resolve(saveChart(payload))
+      .then(() => {
+        setSearchParams({ chartId: id });
+        setStatusMessage(`Saved chart "${payload.title}".`);
+      })
+      .catch((err) => {
+        console.error(err);
+        setStatusMessage(`Couldn't save chart: ${err.message}`);
+      });
   };
 
   const resetForm = () => {
@@ -750,7 +764,11 @@ export default function VisualizePage() {
               <div className="mt-4 grid gap-3 text-xs text-slate-500 dark:text-slate-300 sm:grid-cols-3">
                 <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900/40">
                   <p className="font-semibold text-slate-700 dark:text-slate-200">{selectedDataset.name}</p>
-                  <p>{datasetRows.length} rows</p>
+                  <p>
+                    {rowsLoading
+                      ? "Loading rows…"
+                      : `${(selectedDataset.originalRowCount ?? datasetTotal).toLocaleString()} rows`}
+                  </p>
                 </div>
                 <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-900/40">
                   <p className="font-semibold text-slate-700 dark:text-slate-200">Columns</p>
@@ -773,17 +791,26 @@ export default function VisualizePage() {
               {isDirty ? <span className="text-xs font-medium text-brand-600 dark:text-brand-400">Unsaved changes</span> : null}
             </div>
             <div className="flex-1 min-h-0 rounded-xl bg-slate-50 p-6 dark:bg-slate-900/40 h-full w-full">
-              <ChartRenderer
-                chart={{
-                  id: currentChartId || "preview",
-                  title: title || "Preview",
-                  chartType,
-                  mappings,
-                  options
-                }}
-                data={previewData}
-                compact
-              />
+              {rowsLoading ? (
+                <ChartStatus compact>Loading data…</ChartStatus>
+              ) : rowsError ? (
+                <ChartStatus compact tone="error">
+                  Couldn&apos;t load data: {rowsError.message}
+                </ChartStatus>
+              ) : (
+                <ChartRenderer
+                  chart={{
+                    id: currentChartId || "preview",
+                    title: title || "Preview",
+                    chartType,
+                    mappings,
+                    options
+                  }}
+                  data={previewData}
+                  compact
+                />
+              )}
+              {rowsTruncated ? <TruncationNote shown={datasetRows.length} total={datasetTotal} /> : null}
             </div>
           </div>
           <div className="rounded-2xl bg-brand-50 p-5 text-sm text-brand-900 ring-1 ring-inset ring-brand-100">
