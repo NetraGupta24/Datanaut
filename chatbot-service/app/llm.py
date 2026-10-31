@@ -25,8 +25,11 @@ Dataset profile (computed with pandas):
 Rules:
 - Use only numbers from the profile or tool results; if they don't cover the question, say so.
 - For any total, average, count, ranking, comparison, trend, correlation, outlier or filtered figure that the profile does not already state, call a tool. Do not estimate or compute numbers yourself.
+- For differences or ratios between two groups, use the compare tool rather than subtracting or dividing tool results yourself.
+- Don't add units or currency symbols that aren't in the data.
 - Use exact column names from the profile.
-- Keep answers short: a few sentences or a brief bullet list. Mention the filters and aggregation you used.
+- Keep answers short: a few sentences or a brief "-" bullet list. Mention the filters and aggregation you used.
+- Format as plain text. **Bold** is fine; no Markdown tables or headings (the chat widget shows tool tables separately).
 - If a tool returns an error, fix the arguments and try again, or explain what is missing.
 - If the question is not about this dataset, say what you can help with instead."""
 

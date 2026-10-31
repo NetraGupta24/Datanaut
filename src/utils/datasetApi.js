@@ -8,10 +8,12 @@ export const API_URL = (import.meta.env.VITE_API_URL || "http://localhost:8000")
 export const MAX_CHART_ROWS = 50000;
 
 export class ApiError extends Error {
-  constructor(message, status) {
+  // status 0 means no HTTP response; `code` is then "timeout" or "network"
+  constructor(message, status, code = null) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -42,9 +44,9 @@ export async function apiFetch(path, { timeoutMs = 60000, headers, ...options } 
     });
   } catch (error) {
     if (error.name === "AbortError") {
-      throw new ApiError("The data service took too long to respond. Please try again.", 0);
+      throw new ApiError("The data service took too long to respond. Please try again.", 0, "timeout");
     }
-    throw new ApiError(`Can't reach the data service at ${API_URL}. Is it running?`, 0);
+    throw new ApiError(`Can't reach the data service at ${API_URL}. Is it running?`, 0, "network");
   } finally {
     clearTimeout(timer);
   }
