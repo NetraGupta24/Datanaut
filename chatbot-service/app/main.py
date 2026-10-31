@@ -4,18 +4,21 @@ import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Path, Query, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Path, Query, Request, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
 
 from .auth import get_current_uid
 from .config import MAX_ROWS_PER_REQUEST, Settings, get_settings
 from .ingest import IngestError, load_dataframe, preview_records, rows_to_json
+from .llm import ChatEngine, ChatServiceError, make_groq_client
 from .metadata import FirestoreMetadata, MetadataStore
-from .models import DatasetMetadata, DeleteResult
+from .models import ChatRequest, ChatResponse, DatasetMetadata, DeleteResult
 from .profiling import profile_dataframe
-from .storage import DatasetNotFound, DatasetStorage, LocalStorage
+from .storage import CachedStorage, DatasetNotFound, DatasetStorage, LocalStorage
 
 DATASET_ID_PATTERN = r"^[A-Za-z0-9_-]{1,128}$"
 
@@ -30,15 +33,46 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
+# Rate limits are per signed-in user; chat_user() puts the verified uid on request.state
+limiter = Limiter(key_func=lambda request: f"uid:{request.state.uid}")
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+def _rate_limited(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={"detail": f"Too many chat requests (limit {exc.detail}). Please wait a moment and try again."},
+        headers={"Retry-After": "60"},
+    )
+
 
 @lru_cache
 def get_storage() -> DatasetStorage:
-    return LocalStorage(get_settings().data_dir)
+    settings = get_settings()
+    return CachedStorage(LocalStorage(settings.data_dir), max_items=settings.dataframe_cache_size)
 
 
 @lru_cache
 def get_metadata_store() -> MetadataStore:
     return FirestoreMetadata(get_settings())
+
+
+def get_chat_engine() -> ChatEngine:
+    settings = get_settings()
+    if not settings.groq_api_key:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Chat isn't configured: set GROQ_API_KEY in chatbot-service/.env.")
+    return _chat_engine(settings.groq_api_key.get_secret_value(), settings.groq_model, settings.groq_timeout_s)
+
+
+@lru_cache
+def _chat_engine(api_key: str, model: str, timeout_s: float) -> ChatEngine:
+    return ChatEngine(make_groq_client(api_key, timeout_s), model)
+
+
+def chat_user(request: Request, uid: str = Depends(get_current_uid)) -> str:
+    request.state.uid = uid
+    return uid
 
 
 def _now() -> str:
@@ -143,3 +177,34 @@ def delete_dataset(
     if not (doc_existed or file_deleted or charts_deleted):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Dataset not found.")
     return DeleteResult(deleted=True, chartsDeleted=charts_deleted)
+
+
+@app.post("/chat", response_model=ChatResponse)
+@limiter.limit(get_settings().chat_rate_limit)
+def chat(
+    request: Request,
+    body: ChatRequest,
+    uid: str = Depends(chat_user),
+    storage: DatasetStorage = Depends(get_storage),
+    metadata: MetadataStore = Depends(get_metadata_store),
+    engine: ChatEngine = Depends(get_chat_engine),
+) -> ChatResponse:
+    meta = metadata.get_dataset(uid, body.dataset_id)
+    if meta is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Dataset not found.")
+    if not meta.get("profile") or not meta.get("storagePath"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This dataset was saved before the data service existed. Re-upload it on the Data page to chat about it.",
+        )
+    try:
+        df = storage.load(uid, body.dataset_id)
+    except DatasetNotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The stored rows for this dataset are missing.") from exc
+
+    history = [turn.model_dump() for turn in body.history]
+    try:
+        result = engine.answer(df, meta.get("name", "dataset"), meta["profile"], history, body.message)
+    except ChatServiceError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    return ChatResponse(answer=result.answer, evidence=result.evidence)

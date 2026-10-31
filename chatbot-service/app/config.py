@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SERVICE_DIR = Path(__file__).resolve().parent.parent
@@ -28,6 +28,15 @@ class Settings(BaseSettings):
 
     max_upload_mb: int = 50
     preview_rows: int = 50
+    # Loaded DataFrames kept in memory (LRU) for /rows and /chat
+    dataframe_cache_size: int = 10
+
+    # Chat (Groq). The key stays on the server; the browser never sees it.
+    groq_api_key: SecretStr | None = None
+    # llama-3.3-70b-versatile is no longer served by Groq; gpt-oss-120b handles tool calls well
+    groq_model: str = "openai/gpt-oss-120b"
+    groq_timeout_s: float = 30.0
+    chat_rate_limit: str = "20/minute"
 
     @field_validator("data_dir")
     @classmethod

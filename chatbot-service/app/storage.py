@@ -7,7 +7,9 @@ implement the same three methods later without touching the endpoints.
 
 import os
 import re
+import threading
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from pathlib import Path
 
 import pandas as pd
@@ -72,3 +74,46 @@ class LocalStorage(DatasetStorage):
             return True
         except FileNotFoundError:
             return False
+
+
+class CachedStorage(DatasetStorage):
+    """Keeps the most recently used DataFrames in memory (LRU) in front of another backend.
+
+    Cached frames are shared between requests, so callers must not modify them in place.
+    """
+
+    def __init__(self, backend: DatasetStorage, max_items: int = 10):
+        self.backend = backend
+        self.max_items = max_items
+        self._frames: OrderedDict[tuple[str, str], pd.DataFrame] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def save(self, uid: str, dataset_id: str, df: pd.DataFrame) -> str:
+        self._forget(uid, dataset_id)
+        return self.backend.save(uid, dataset_id, df)
+
+    def load(self, uid: str, dataset_id: str) -> pd.DataFrame:
+        key = (uid, dataset_id)
+        with self._lock:
+            if key in self._frames:
+                self._frames.move_to_end(key)
+                return self._frames[key]
+        df = self.backend.load(uid, dataset_id)
+        with self._lock:
+            self._frames[key] = df
+            self._frames.move_to_end(key)
+            while len(self._frames) > self.max_items:
+                self._frames.popitem(last=False)
+        return df
+
+    def delete(self, uid: str, dataset_id: str) -> bool:
+        self._forget(uid, dataset_id)
+        return self.backend.delete(uid, dataset_id)
+
+    def _forget(self, uid: str, dataset_id: str) -> None:
+        with self._lock:
+            self._frames.pop((uid, dataset_id), None)
+
+    def cached_keys(self) -> list[tuple[str, str]]:
+        with self._lock:
+            return list(self._frames)
