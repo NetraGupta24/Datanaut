@@ -184,8 +184,20 @@ function Layout() {
 
 // ✅ Protect private routes
 function PrivateRoute({ children }) {
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
   const location = useLocation();
+
+  // Wait for Firebase to restore the session so a refresh doesn't bounce to /login
+  if (loading) {
+    return (
+      <div className="flex min-h-[50vh] items-center justify-center">
+        <div className="flex items-center gap-2 rounded-full border border-white/20 bg-white/60 px-4 py-2 text-sm text-slate-600 shadow-lg backdrop-blur-md dark:border-white/10 dark:bg-slate-900/60 dark:text-slate-300">
+          <span className="h-2 w-2 animate-ping rounded-full bg-brand-500" />
+          Checking your session…
+        </div>
+      </div>
+    );
+  }
 
   if (!user) {
     return <Navigate to="/login" state={{ from: location }} replace />;
@@ -215,7 +227,16 @@ export default function App() {
         />
         <Route
           path="/login"
-          element={user ? <Navigate to="/dashboard" replace /> : <Login />}
+          element={
+            user ? (
+              <Navigate
+                to={location.state?.from ? `${location.state.from.pathname}${location.state.from.search || ""}` : "/dashboard"}
+                replace
+              />
+            ) : (
+              <Login />
+            )
+          }
         />
         <Route
           path="/home"

@@ -10,72 +10,31 @@ import {
 } from "firebase/auth";
 import { doc, setDoc, serverTimestamp } from "firebase/firestore";
 
-// Function to test if Firebase auth is properly configured
-const testFirebaseAuth = async () => {
-  if (!auth) return false;
-  try {
-    // Try to get the auth instance - this will fail if auth is not properly configured
-    await new Promise((resolve, reject) => {
-      const unsubscribe = onAuthStateChanged(auth, (user) => {
-        unsubscribe();
-        resolve(user);
-      });
-      setTimeout(() => reject(new Error('Auth test timeout')), 1000);
-    });
-    return true;
-  } catch (error) {
-    console.log('🔥 Firebase Auth test failed, switching to demo mode:', error.message);
-    return false;
-  }
-};
-
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [isDemoMode, setIsDemoMode] = useState(DEMO_MODE);
   const googleProvider = useMemo(() => new GoogleAuthProvider(), []);
 
   useEffect(() => {
-    const initializeAuth = async () => {
-      if (DEMO_MODE) {
-        // Demo mode - simulate logged out state
+    // Demo mode is opt-in only (VITE_DEMO_MODE=true); never a silent fallback
+    if (DEMO_MODE || !auth) {
+      setUser(null);
+      setLoading(false);
+      return undefined;
+    }
+
+    // Subscribe to Firebase auth state
+    const unsubscribe = onAuthStateChanged(auth, (fbUser) => {
+      if (fbUser) {
+        setUser({ uid: fbUser.uid, email: fbUser.email });
+      } else {
         setUser(null);
-        setLoading(false);
-        return;
       }
-
-      // Test if Firebase auth is properly configured
-      const authWorking = await testFirebaseAuth();
-      
-      if (!authWorking) {
-        console.log('🔥 Switching to DEMO MODE - Firebase Auth not properly configured');
-        console.log('📝 To fix: Enable Email/Password authentication in Firebase Console > Authentication > Sign-in method');
-        setIsDemoMode(true);
-        setUser(null);
-        setLoading(false);
-        return;
-      }
-
-      if (!auth) {
-        setLoading(false);
-        return;
-      }
-
-      // Subscribe to Firebase auth state
-      const unsubscribe = onAuthStateChanged(auth, (fbUser) => {
-        if (fbUser) {
-          setUser({ uid: fbUser.uid, email: fbUser.email });
-        } else {
-          setUser(null);
-        }
-        setLoading(false);
-      });
-      return () => unsubscribe();
-    };
-
-    initializeAuth();
+      setLoading(false);
+    });
+    return () => unsubscribe();
   }, []);
 
   const signup = async (email, password) => {
@@ -83,7 +42,7 @@ export function AuthProvider({ children }) {
       throw new Error("Email and password are required.");
     }
 
-    if (isDemoMode || DEMO_MODE) {
+    if (DEMO_MODE) {
       // Demo mode - simulate successful signup
       const demoUser = { uid: 'demo-user', email: email.trim() };
       setUser(demoUser);
@@ -111,7 +70,7 @@ export function AuthProvider({ children }) {
       throw new Error("Email and password are required.");
     }
 
-    if (isDemoMode || DEMO_MODE) {
+    if (DEMO_MODE) {
       // Demo mode - simulate successful login
       const demoUser = { uid: 'demo-user', email: email.trim() };
       setUser(demoUser);
@@ -127,7 +86,7 @@ export function AuthProvider({ children }) {
   };
 
   const loginWithGoogle = async () => {
-    if (isDemoMode || DEMO_MODE) {
+    if (DEMO_MODE) {
       const demoUser = { uid: "demo-google-user", email: "demo-google-user@example.com", provider: "google" };
       setUser(demoUser);
       return demoUser;
@@ -142,7 +101,7 @@ export function AuthProvider({ children }) {
   };
 
   const logout = async () => {
-    if (isDemoMode || DEMO_MODE) {
+    if (DEMO_MODE) {
       // Demo mode - simulate logout
       setUser(null);
       return;

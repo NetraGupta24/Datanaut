@@ -15,5 +15,6 @@ const app = initializeApp(firebaseConfig);
 
 export const auth = getAuth(app);
 export const db = getFirestore(app);
-export const DEMO_MODE = false;
+// Demo mode (any email/password works, nothing is saved to Firebase) only when explicitly enabled
+export const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
 export default app;
